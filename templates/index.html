@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>FitCheck AI</title>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #080b0f;
+      --card: #141920;
+      --border: #1f2835;
+      --accent: #c8f135;
+      --accent2: #ff5e3a;
+      --accent3: #38d9f5;
+      --text: #dde6f0;
+      --muted: #5a6a7e;
+      --good: #c8f135;
+      --bad: #ff5e3a;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'DM Sans', sans-serif;
+      overflow-x: hidden;
+    }
+
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9999;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      opacity: 0.025;
+    }
+
+    .shell {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      max-width: 1380px;
+      margin: 0 auto;
+      padding: 0 22px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 18px 0 14px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+    }
+
+    .logo-mark {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 20px rgba(200,241,53,0.35);
+    }
+
+    .logo-mark svg {
+      width: 24px;
+      height: 24px;
+    }
+
+    .logo-text {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 30px;
+      letter-spacing: 3px;
+    }
+
+    .logo-text span {
+      color: var(--accent);
+    }
+
+    .live-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 7px 16px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--good);
+      box-shadow: 0 0 8px var(--good);
+      animation: blink 2s ease-in-out infinite;
+    }
+
+    @keyframes blink {
+      0%,100% { opacity: 1; }
+      50% { opacity: .3; }
+    }
+
+    main {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 18px;
+      padding: 18px 0;
+      align-items: start;
+    }
+
+    @media (max-width: 860px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .video-wrap {
+      position: relative;
+      background: #000;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      overflow: hidden;
+      min-height: 420px;
+    }
+
+    .video-wrap img {
+      width: 100%;
+      display: block;
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+      background: #000;
+    }
+
+    .vid-badge {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      background: rgba(0,0,0,.65);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 4px 11px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      color: var(--accent2);
+      text-transform: uppercase;
+    }
+
+    .posture-pill {
+      position: absolute;
+      bottom: 18px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 8px 26px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .posture-pill.good {
+      background: rgba(200,241,53,.15);
+      color: var(--good);
+      border: 1px solid var(--good);
+    }
+
+    .posture-pill.bad {
+      background: rgba(255,94,58,.15);
+      color: var(--bad);
+      border: 1px solid var(--bad);
+    }
+
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .stats-panel,
+    .hist-box,
+    .tips {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+    }
+
+    .stats-panel-title,
+    .sec-label,
+    .cal-label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .stat-item {
+      text-align: center;
+    }
+
+    .s-val {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 42px;
+      color: var(--accent);
+      line-height: 1;
+    }
+
+    .s-label {
+      font-size: 10px;
+      color: var(--muted);
+      margin-top: 4px;
+    }
+
+    .stage-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+    }
+
+    .stage-badge {
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      padding: 4px 14px;
+      border-radius: 999px;
+      background: rgba(200,241,53,.1);
+      color: var(--accent);
+      border: 1px solid rgba(200,241,53,.3);
+    }
+
+    .cal-card {
+      background: linear-gradient(140deg, #1b2410 0%, var(--card) 100%);
+      border: 1px solid rgba(200,241,53,.2);
+      border-radius: 14px;
+      padding: 14px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .cal-num {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 38px;
+      color: var(--accent);
+      line-height: 1;
+    }
+
+    .cal-unit {
+      font-size: 10px;
+      color: var(--muted);
+    }
+
+    .ex-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .ex-btn {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 13px 8px;
+      cursor: pointer;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+      color: var(--text);
+    }
+
+    .ex-btn.active {
+      border-color: var(--accent);
+      background: rgba(200,241,53,.1);
+      box-shadow: 0 0 18px rgba(200,241,53,.15);
+    }
+
+    .ex-btn .ico { font-size: 20px; }
+    .ex-btn .lbl { font-size: 10px; font-weight: 600; }
+    .ex-btn.wide { grid-column: span 2; }
+
+    .tips {
+      color: var(--accent3);
+      line-height: 1.6;
+      font-size: 11px;
+    }
+
+    .tips b {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .hist-box {
+      max-height: 175px;
+      overflow-y: auto;
+    }
+
+    .hist-row {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .hist-row:last-child {
+      border-bottom: none;
+    }
+
+    .hist-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--accent);
+      flex-shrink: 0;
+    }
+
+    .end-btn,
+    .reset-btn {
+      width: 100%;
+      border-radius: 11px;
+      padding: 10px;
+      cursor: pointer;
+      font-family: 'DM Sans', sans-serif;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+
+    .end-btn {
+      background: rgba(255,94,58,.08);
+      border: 1px solid rgba(255,94,58,.35);
+      color: var(--accent2);
+    }
+
+    .reset-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+
+    footer {
+      padding: 14px 0;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    footer b {
+      color: var(--accent);
+      font-weight: 600;
+    }
+    .chat-section{
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+}
+
+#chat-box{
+  height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.chat-input-row{
+  display:flex;
+  gap:8px;
+}
+
+.chat-input-row input{
+  flex:1;
+  padding:10px;
+  background:#0d1218;
+  border:1px solid var(--border);
+  color:white;
+  border-radius:8px;
+}
+
+.chat-input-row button{
+  padding:10px 14px;
+  border:none;
+  border-radius:8px;
+  background:var(--accent);
+  cursor:pointer;
+  font-weight:700;
+}
+
+.user-msg{
+  color:var(--accent3);
+  margin-bottom:8px;
+}
+
+.ai-msg{
+  color:var(--accent);
+  margin-bottom:12px;
+}
+  </style>
+</head>
+<body>
+<div class="shell">
+
+  <header>
+    <div class="logo">
+      <div class="logo-mark">
+        <svg viewBox="0 0 24 24" fill="none">
+          <circle cx="12" cy="12" r="4" fill="#0a0a0f"/>
+          <path d="M6 12H3M21 12h-3M12 6V3M12 21v-3M7.05 7.05 5.636 5.636M18.364 5.636 16.95 7.05M7.05 16.95l-1.414 1.414M16.95 16.95l1.414 1.414"
+                stroke="#0a0a0f" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <span class="logo-text">FIT<span>CHECK</span> AI</span>
+    </div>
+    <div class="live-pill">
+      <span class="live-dot"></span>
+      Camera Live
+    </div>
+  </header>
+
+  <main>
+    <div class="video-wrap">
+      <img src="/video" alt="Live camera feed" id="videoFeed">
+      <div class="vid-badge">● REC</div>
+      <div class="posture-pill good" id="posturePill">✓ Good Posture</div>
+    </div>
+
+    <div class="sidebar">
+      <div class="stats-panel">
+        <div class="stats-panel-title">Live Stats</div>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <div class="s-val" id="repsVal">0</div>
+            <div class="s-label">Reps / Secs</div>
+          </div>
+          <div class="stat-item">
+            <div class="s-val" id="exVal" style="font-size:22px; color:var(--accent3);">SQUAT</div>
+            <div class="s-label">Exercise</div>
+          </div>
+        </div>
+        <div class="stage-row">
+          <span class="s-label">Current Stage</span>
+          <span class="stage-badge" id="stageVal">UP</span>
+        </div>
+      </div>
+
+      <div class="cal-card">
+        <div>
+          <div class="cal-label">Calories Burned</div>
+          <div class="cal-num" id="calVal">0.0</div>
+          <div class="cal-unit">kcal estimated</div>
+        </div>
+        <div style="font-size:32px;">🔥</div>
+      </div>
+
+      <div>
+        <div class="sec-label">Your Weight</div>
+
+<div class="chat-input-row" style="margin-bottom:12px;">
+    <input
+        type="number"
+        id="weightInput"
+        value="70"
+        min="20"
+        max="200"
+        placeholder="Weight in kg">
+    <button onclick="saveWeight()">Save</button>
+</div>
+        <div class="sec-label">Choose Exercise</div>
+        <div class="ex-grid">
+          <button class="ex-btn active" data-ex="squat" onclick="setEx(this)"><span class="ico">🏋️</span><span class="lbl">Squat</span></button>
+          <button class="ex-btn" data-ex="pushup" onclick="setEx(this)"><span class="ico">💪</span><span class="lbl">Push-up</span></button>
+          <button class="ex-btn" data-ex="jumpingjack" onclick="setEx(this)"><span class="ico">⭐</span><span class="lbl">Jumping Jack</span></button>
+          <button class="ex-btn" data-ex="bicepcurl" onclick="setEx(this)"><span class="ico">🦾</span><span class="lbl">Bicep Curl</span></button>
+          <button class="ex-btn wide" data-ex="plank" onclick="setEx(this)"><span class="ico">🧘</span><span class="lbl">Plank (seconds held)</span></button>
+        </div>
+      </div>
+
+      <div class="tips" id="tipsBox">
+        <b>🏋️ SQUAT TIPS</b>
+        Stand sideways to camera · Full body in frame · Feet shoulder-width apart
+      </div>
+
+      <div>
+        <div class="sec-label">Session Log</div>
+        <div class="hist-box" id="histBox">
+          <div class="hist-row" style="font-style:italic">No sessions yet — start moving!</div>
+        </div>
+      </div>
+      <div class="chat-section">
+    <div class="sec-label">AI Fitness Coach</div>
+
+    <div id="chat-box"></div>
+
+    <div class="chat-input-row">
+        <input
+            type="text"
+            id="chat-input"
+            placeholder="Ask about workouts, posture, nutrition..."
+        >
+        <button onclick="sendMessage()">Send</button>
+    </div>
+</div>
+
+<button class="end-btn" onclick="endSession()">■ &nbsp;End Session</button>
+<button class="reset-btn" onclick="doReset()">↺ &nbsp;Reset Session</button>
+     
+    </div>
+  </main>
+
+  <footer>
+    <div>Powered by <b>MediaPipe</b> &amp; <b>FitCheck AI</b></div>
+    <div id="clock"></div>
+  </footer>
+
+</div>
+
+<script>
+  function tick(){
+    document.getElementById('clock').textContent =
+      new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  }
+  tick();
+  setInterval(tick, 1000);
+
+  const TIPS = {
+    squat: { icon:'🏋️', title:'SQUAT TIPS', text:'Stand sideways to camera · Full body in frame · Feet shoulder-width apart' },
+    pushup: { icon:'💪', title:'PUSH-UP TIPS', text:'Side view works best · Keep body straight · Full arm extension up' },
+    jumpingjack: { icon:'⭐', title:'JUMPING JACK TIPS', text:'Face the camera · Arms fully above head for OPEN · Feet together for CLOSE' },
+    bicepcurl: { icon:'🦾', title:'BICEP CURL TIPS', text:'Face camera or slight angle · Upper arm stays still · Full extension down' },
+    plank: { icon:'🧘', title:'PLANK TIPS', text:'Side view works best · Keep hips level · Timer counts while posture is GOOD' }
+  };
+
+  let pendingExercise = null;
+  let lastHist = '';
+
+  function setEx(btn){
+    document.querySelectorAll('.ex-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    const ex = btn.dataset.ex;
+    pendingExercise = ex;
+
+    fetch('/set_exercise/' + ex).finally(() => {
+      pendingExercise = null;
+    });
+
+    const t = TIPS[ex];
+    document.getElementById('tipsBox').innerHTML = `<b>${t.icon} ${t.title}</b>${t.text}`;
+    document.getElementById('repsVal').textContent = '0';
+    document.getElementById('stageVal').textContent = 'UP';
+    document.getElementById('exVal').textContent = ex.toUpperCase();
+    document.getElementById('calVal').textContent = '0.0';
+  }
+
+  function endSession(){
+    if(!confirm('End current session? This will save reps, calories and posture in session log.')) return;
+    fetch('/end_session').then(() => pollHistory());
+  }
+
+  function doReset(){
+    if(!confirm('Reset session? Clears reps, calories and log.')) return;
+    fetch('/reset').then(() => {
+      document.getElementById('histBox').innerHTML =
+        '<div class="hist-row" style="font-style:italic">No sessions yet — start moving!</div>';
+      document.getElementById('repsVal').textContent = '0';
+      document.getElementById('calVal').textContent = '0.0';
+      document.getElementById('stageVal').textContent = 'UP';
+      lastHist = '';
+    });
+  }
+
+  async function pollStats(){
+    try{
+      const d = await fetch('/stats').then(r => r.json());
+      document.getElementById('repsVal').textContent = d.reps;
+      document.getElementById('calVal').textContent = d.calories.toFixed(1);
+      document.getElementById('stageVal').textContent = d.stage;
+
+      if(!pendingExercise){
+        document.getElementById('exVal').textContent = d.exercise.toUpperCase();
+      }
+
+      const pill = document.getElementById('posturePill');
+      if(d.posture === 'GOOD'){
+        pill.className = 'posture-pill good';
+        pill.textContent = '✓ Good Posture';
+      } else {
+        pill.className = 'posture-pill bad';
+        pill.textContent = '⚠ Fix Your Posture';
+      }
+    } catch(e){}
+  }
+
+  async function pollHistory(){
+    try{
+      const d = await fetch('/history').then(r => r.json());
+      const hist = JSON.stringify(d.history || []);
+      if(hist === lastHist) return;
+      lastHist = hist;
+
+      const items = d.history || [];
+      const box = document.getElementById('histBox');
+
+      if(!items.length){
+        box.innerHTML = '<div class="hist-row" style="font-style:italic">No sessions yet — start moving!</div>';
+        return;
+      }
+
+      box.innerHTML = [...items].reverse().map(item => `
+        <div class="hist-row">
+          <span class="hist-dot"></span>
+          <span>${item}</span>
+        </div>
+      `).join('');
+    } catch(e){}
+  }
+  function saveWeight() {
+    const weight = document.getElementById("weightInput").value;
+
+    fetch("/set_weight", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            weight: weight
+        })
+    });
+}
+  setInterval(pollStats, 500);
+  setInterval(pollHistory, 900);
+  pollStats();
+  pollHistory();
+  async function sendMessage(){
+
+  const input = document.getElementById("chat-input");
+  const message = input.value.trim();
+
+  if(!message) return;
+
+  const chatBox = document.getElementById("chat-box");
+
+  chatBox.innerHTML += `
+    <div class="user-msg">
+      <b>You:</b> ${message}
+    </div>
+  `;
+
+  input.value = "";
+
+  try{
+
+    const response = await fetch("/chat",{
+      method:"POST",
+      headers:{
+        "Content-Type":"application/json"
+      },
+      body:JSON.stringify({
+        message:message
+      })
+    });
+
+    const data = await response.json();
+
+    chatBox.innerHTML += `
+      <div class="ai-msg">
+        <b>Coach:</b> ${data.reply}
+      </div>
+    `;
+
+    chatBox.scrollTop = chatBox.scrollHeight;
+
+  }catch(err){
+
+    chatBox.innerHTML += `
+      <div class="ai-msg">
+        <b>Coach:</b> Error contacting Gemini.
+      </div>
+    `;
+  }
+}
+</script>
+</body>
+</html>
