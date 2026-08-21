@@ -1,4 +1,5 @@
-from flask import Flask, render_template, Response, jsonify, request
+from pymongo import MongoClient
+from flask import Flask, render_template, Response, jsonify, request, redirect, url_for, session
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -8,11 +9,34 @@ import json
 import os
 from dotenv import load_dotenv
 from groq import Groq
+from authlib.integrations.flask_client import OAuth
 load_dotenv()
+mongo_client = MongoClient(os.getenv("MONGO_URI"))
+db = mongo_client["fitcheck"]
+workouts_collection = db["workouts"]
+
+try:
+    mongo_client.admin.command("ping")
+    print("MongoDB connected successfully!")
+except Exception as e:
+    print("MongoDB connection error:", e)
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "fitcheck-secret-key")
+
+oauth = OAuth(app)
+
+google = oauth.register(
+    name="google",
+    client_id=os.getenv("GOOGLE_CLIENT_ID"),
+    client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+    client_kwargs={
+        "scope": "openid email profile"
+    }
+)
 client = Groq(
     api_key=os.getenv("GROQ_API_KEY")
 )
@@ -91,17 +115,22 @@ detector = vision.PoseLandmarker.create_from_options(options)
 
 # ================= STORAGE =================
 def save_history():
-    with open("data.json", "w") as f:
-        json.dump({
-            "history": history
-        }, f)
+    workouts_collection.delete_many({})
+
+    if history:
+        workouts_collection.insert_many(history)
+
 
 def load_history():
     global history
-    if os.path.exists("data.json"):
-        with open("data.json", "r") as f:
-            data = json.load(f)
-            history = data.get("history", [])
+
+    history = list(
+        workouts_collection.find(
+            {},
+            {"_id": 0}
+        )
+    )
+
 
 load_history()
 
@@ -344,8 +373,34 @@ def generate_frames():
                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
 
 # ================= ROUTES =================
+@app.route("/login")
+def login():
+    redirect_uri = url_for("auth_callback", _external=True)
+    return google.authorize_redirect(redirect_uri)
+
+
+@app.route("/login/callback")
+def auth_callback():
+    token = google.authorize_access_token()
+    user_info = token.get("userinfo")
+
+    session["user"] = {
+        "name": user_info["name"],
+        "email": user_info["email"],
+        "picture": user_info.get("picture", "")
+    }
+
+    return redirect(url_for("index"))
+
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("index"))
 @app.route('/')
 def index():
+    if "user" not in session:
+        return redirect(url_for("login"))
     return render_template('index.html')
 
 @app.route('/video')
