@@ -29,6 +29,14 @@ angle_buffer = []
 plank_start_time = None
 session_active = True
 
+target_reps = 10
+rep_times = []
+last_rep_timestamp = None
+long_pause_count = 0
+bad_form_count = 0
+struggle_score = 0
+last_rep_duration = None
+
 cap = None
 cap_lock = threading.Lock()
 
@@ -43,9 +51,9 @@ def init_camera():
             pass
 
     backends = [
-        (1, cv2.CAP_DSHOW),
-        (1, cv2.CAP_MSMF),
-        (1, 0),
+       (0, cv2.CAP_DSHOW),
+    (0, cv2.CAP_MSMF),
+    (0, cv2.CAP_ANY),
     ]
 
     for idx, backend in backends:
@@ -110,6 +118,33 @@ def smooth_angle(angle):
     if len(angle_buffer) > 5:
         angle_buffer.pop(0)
     return sum(angle_buffer) / len(angle_buffer)
+def record_completed_rep():
+    global counter, last_rep_timestamp, last_rep_duration
+    global rep_times, long_pause_count, bad_form_count, struggle_score
+
+    now = time.time()
+
+    if last_rep_timestamp is not None:
+        duration = now - last_rep_timestamp
+        last_rep_duration = duration
+        rep_times.append(duration)
+
+        if duration > 5:
+            long_pause_count += 1
+
+        if len(rep_times) >= 3:
+            previous_average = sum(rep_times[:-1]) / len(rep_times[:-1])
+
+            if duration > previous_average * 1.5:
+                struggle_score = min(100, struggle_score + 10)
+
+    last_rep_timestamp = now
+
+    if posture == "BAD":
+        bad_form_count += 1
+        struggle_score = min(100, struggle_score + 15)
+
+    counter += 1
 
 def lm(landmarks, idx):
     return [landmarks[idx].x, landmarks[idx].y]
@@ -228,7 +263,7 @@ def generate_frames():
                             stage = "DOWN"
                         elif elbow_angle > 150 and stage == "DOWN":
                             stage = "UP"
-                            counter += 1
+                            record_completed_rep()
                             weight_factor = user_weight / 70
                             calories += 0.35 * weight_factor
 
@@ -248,7 +283,7 @@ def generate_frames():
                             stage = "OPEN"
                         elif hands_down and leg_dist < 0.22 and stage == "OPEN":
                             stage = "CLOSE"
-                            counter += 1
+                            record_completed_rep()
                             weight_factor = user_weight / 70
                             calories += 0.45 * weight_factor
 
@@ -265,7 +300,7 @@ def generate_frames():
                             stage = "DOWN"
                         elif elbow_angle < 55 and stage == "DOWN":
                             stage = "UP"
-                            counter += 1
+                            record_completed_rep()
                             weight_factor = user_weight / 70
                             calories += 0.25 * weight_factor
 
@@ -339,6 +374,8 @@ def set_exercise(name):
 @app.route('/reset')
 def reset():
     global counter, stage, posture, angle_buffer, calories, history, plank_start_time, session_active
+    global rep_times, last_rep_timestamp, long_pause_count, bad_form_count
+    global struggle_score, last_rep_duration
     counter = 0
     stage = "UP"
     posture = "GOOD"
@@ -347,6 +384,12 @@ def reset():
     history = []
     plank_start_time = None
     session_active = True
+    rep_times = []
+    last_rep_timestamp = None
+    long_pause_count = 0
+    bad_form_count = 0
+    struggle_score = 0
+    last_rep_duration = None
     save_history()
     return "OK"
 
@@ -372,10 +415,15 @@ def end_session():
 def stats():
     return jsonify({
         "reps": int(counter),
+        "target_reps": target_reps,
         "stage": stage,
         "posture": posture,
         "exercise": exercise,
-        "calories": round(calories, 2)
+        "calories": round(calories, 2),
+        "last_rep_duration": round(last_rep_duration, 2) if last_rep_duration else None,
+        "long_pause_count": long_pause_count,
+        "bad_form_count": bad_form_count,
+        "struggle_score": struggle_score
     })
 
 @app.route('/history')
@@ -406,7 +454,7 @@ def chat():
     try:
 
         completion = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=[
                 {
                     "role": "user",
