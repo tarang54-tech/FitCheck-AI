@@ -3,6 +3,7 @@ FROM python:3.11-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
+    libegl1 \
     libgles2 \
     libgl1 \
     libglib2.0-0 \
