@@ -140,13 +140,14 @@
       min-height: 420px;
     }
 
-    .video-wrap img {
-      width: 100%;
-      display: block;
-      aspect-ratio: 4 / 3;
-      object-fit: cover;
-      background: #000;
-    }
+   .video-wrap video {
+    width: 100%;
+    display: block;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    background: #000;
+    transform: scaleX(-1);
+}
 
     .vid-badge {
       position: absolute;
@@ -453,15 +454,29 @@
       </div>
       <span class="logo-text">FIT<span>CHECK</span> AI</span>
     </div>
+    <div style="display:flex; align-items:center; gap:10px;">
     <div class="live-pill">
-      <span class="live-dot"></span>
-      Camera Live
+        <span class="live-dot"></span>
+        Camera Live
     </div>
+
+    {% if session.get("user") %}
+    <div class="live-pill">
+        👤 {{ session["user"]["name"] }}
+    </div>
+
+    <a href="/logout"
+       style="text-decoration:none; color:var(--accent2); border:1px solid rgba(255,94,58,.35); padding:7px 14px; border-radius:999px; font-size:12px;">
+        Logout
+    </a>
+    {% endif %}
+</div>
   </header>
 
   <main>
     <div class="video-wrap">
-      <img src="/video" alt="Live camera feed" id="videoFeed">
+     <video id="videoFeed" autoplay playsinline muted></video>
+      <canvas id="frameCanvas" width="640" height="480" style="display:none;"></canvas>
       <div class="vid-badge">● REC</div>
       <div class="posture-pill good" id="posturePill">✓ Good Posture</div>
     </div>
@@ -557,6 +572,105 @@
 </div>
 
 <script>
+  let cameraStream = null;
+  let frameTimer = null;
+  let frameInFlight = false;
+
+  async function startCamera() {
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          facingMode: "user"
+        },
+        audio: false
+      });
+
+      const video = document.getElementById("videoFeed");
+      video.srcObject = cameraStream;
+      await video.play();
+
+      startFrameUpload();
+    } catch (error) {
+      console.error("Camera error:", error);
+      alert("Camera access failed: " + error.name);
+    }
+  }
+
+  function updateWorkoutStats(d) {
+    if (!d) return;
+
+    if (typeof d.reps === "number") {
+      document.getElementById('repsVal').textContent = d.reps;
+    }
+    if (typeof d.calories === "number") {
+      document.getElementById('calVal').textContent = Number(d.calories).toFixed(1);
+    }
+    if (d.stage) {
+      document.getElementById('stageVal').textContent = d.stage;
+    }
+    if (d.exercise && !pendingExercise) {
+      document.getElementById('exVal').textContent = d.exercise.toUpperCase();
+    }
+
+    if (d.posture) {
+      const pill = document.getElementById('posturePill');
+      if (d.posture === 'GOOD') {
+        pill.className = 'posture-pill good';
+        pill.textContent = '✓ Good Posture';
+      } else {
+        pill.className = 'posture-pill bad';
+        pill.textContent = '⚠ Fix Your Posture';
+      }
+    }
+  }
+
+  function startFrameUpload() {
+    if (frameTimer) clearInterval(frameTimer);
+
+    frameTimer = setInterval(async () => {
+      const video = document.getElementById('videoFeed');
+      const canvas = document.getElementById('frameCanvas');
+
+      if (frameInFlight || !video.videoWidth || !video.videoHeight) return;
+
+      frameInFlight = true;
+
+      try {
+        canvas.width = 640;
+        canvas.height = 480;
+
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        const blob = await new Promise(resolve =>
+          canvas.toBlob(resolve, 'image/jpeg', 0.75)
+        );
+
+        if (!blob) return;
+
+        const response = await fetch('/process_frame', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'image/jpeg'
+          },
+          body: blob
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          updateWorkoutStats(data);
+        }
+      } catch (error) {
+        console.error('Frame upload error:', error);
+      } finally {
+        frameInFlight = false;
+      }
+    }, 120);
+  }
+
+  startCamera();
   function tick(){
     document.getElementById('clock').textContent =
       new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});

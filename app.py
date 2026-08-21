@@ -61,49 +61,8 @@ bad_form_count = 0
 struggle_score = 0
 last_rep_duration = None
 
-cap = None
-cap_lock = threading.Lock()
-
-# ================= CAMERA INIT =================
-def init_camera():
-    global cap
-
-    if cap is not None:
-        try:
-            cap.release()
-        except:
-            pass
-
-    backends = [
-       (0, cv2.CAP_DSHOW),
-    (0, cv2.CAP_MSMF),
-    (0, cv2.CAP_ANY),
-    ]
-
-    for idx, backend in backends:
-        try:
-            c = cv2.VideoCapture(idx, backend)
-
-            if c.isOpened():
-                c.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-                c.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                c.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                c.set(cv2.CAP_PROP_FPS, 30)
-
-                for _ in range(5):
-                    c.read()
-
-                cap = c
-                print(f"Camera opened with backend={backend}")
-                return
-
-        except Exception as e:
-            print(f"Camera backend {backend} failed: {e}")
-
-    cap = None
-    print("No camera found")
-
-init_camera()
+frame_lock = threading.Lock()
+last_detection_timestamp = 0
 
 # ================= MODEL =================
 base_options = python.BaseOptions(model_asset_path='pose_landmarker_heavy.task')
@@ -203,174 +162,166 @@ def visibility_ok(landmarks, exercise_name, threshold=0.35):
     indices = VISIBILITY_MAP.get(exercise_name, [11, 13, 15])
     return all(landmarks[i].visibility >= threshold for i in indices)
 
-# ================= FRAME GENERATOR =================
-def generate_frames():
-    global counter, stage, posture, exercise, calories, plank_start_time, session_active, cap
-    global min_rep_angle, user_weight
-    while True:
-        with cap_lock:
-            if cap is None or not cap.isOpened():
-                init_camera()
-                time.sleep(0.3)
-                continue
-            success, frame = cap.read()
+# ================= BROWSER FRAME PROCESSING =================
+def process_frame_bytes(frame_bytes):
+    global counter, stage, posture, exercise, calories, plank_start_time, session_active
+    global min_rep_angle, user_weight, last_detection_timestamp
 
-        if not success or frame is None:
-            time.sleep(0.03)
-            continue
+    if not frame_bytes:
+        return {"error": "Empty frame"}
 
-        frame = cv2.flip(frame, 1)
-        h, w = frame.shape[:2]
-        timestamp_ms = int(time.time() * 1000)
+    np_buffer = np.frombuffer(frame_bytes, dtype=np.uint8)
+    frame = cv2.imdecode(np_buffer, cv2.IMREAD_COLOR)
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    if frame is None:
+        return {"error": "Invalid frame"}
 
-        detected = False
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
 
-        try:
-            result = detector.detect_for_video(mp_image, timestamp_ms)
+    timestamp_ms = int(time.time() * 1000)
+    if timestamp_ms <= last_detection_timestamp:
+        timestamp_ms = last_detection_timestamp + 1
+    last_detection_timestamp = timestamp_ms
 
-            if result.pose_landmarks:
-                landmarks = result.pose_landmarks[0]
+    detected = False
 
-                if session_active and visibility_ok(landmarks, exercise):
-                    detected = True
+    with frame_lock:
+        result = detector.detect_for_video(mp_image, timestamp_ms)
 
-                    l_shoulder = lm(landmarks, 11)
-                    l_hip = lm(landmarks, 23)
-                    l_knee = lm(landmarks, 25)
-                    l_ankle = lm(landmarks, 27)
-                    l_elbow = lm(landmarks, 13)
-                    l_wrist = lm(landmarks, 15)
+        if result.pose_landmarks:
+            landmarks = result.pose_landmarks[0]
 
-                    r_shoulder = lm(landmarks, 12)
-                    r_hip = lm(landmarks, 24)
-                    r_knee = lm(landmarks, 26)
-                    r_ankle = lm(landmarks, 28)
-                    r_elbow = lm(landmarks, 14)
-                    r_wrist = lm(landmarks, 16)
+            if session_active and visibility_ok(landmarks, exercise):
+                detected = True
 
-                    left_vis = landmarks[13].visibility
-                    right_vis = landmarks[14].visibility
+                l_shoulder = lm(landmarks, 11)
+                l_hip = lm(landmarks, 23)
+                l_knee = lm(landmarks, 25)
+                l_ankle = lm(landmarks, 27)
+                l_elbow = lm(landmarks, 13)
+                l_wrist = lm(landmarks, 15)
 
-                    # ===== SQUAT =====
-                    if exercise == "squat":
-                        if landmarks[25].visibility >= landmarks[26].visibility:
-                            knee_angle = smooth_angle(calculate_angle(l_hip, l_knee, l_ankle))
-                            min_rep_angle = min(min_rep_angle, knee_angle)
-                            back_angle = smooth_angle(calculate_angle(l_shoulder, l_hip, l_knee))
-                            
-                        else:
-                            knee_angle = smooth_angle(calculate_angle(r_hip, r_knee, r_ankle))
-                            min_rep_angle = min(min_rep_angle, knee_angle)
-                            back_angle = smooth_angle(calculate_angle(r_shoulder, r_hip, r_knee))
-                           
+                r_shoulder = lm(landmarks, 12)
+                r_hip = lm(landmarks, 24)
+                r_knee = lm(landmarks, 26)
+                r_ankle = lm(landmarks, 28)
+                r_elbow = lm(landmarks, 14)
+                r_wrist = lm(landmarks, 16)
 
-                        posture = "GOOD" if back_angle > 150 else "BAD"
+                left_vis = landmarks[13].visibility
+                right_vis = landmarks[14].visibility
 
-                        if knee_angle < 105:
-                            stage = "DOWN"
-                        elif knee_angle > 158 and stage == "DOWN":
-                            stage = "UP"
-                            counter += 1
-                            rom_factor = max(0.8, min(1.3, (160 - min_rep_angle) / 60))
-                            weight_factor = user_weight / 70
-                            calories += 0.5 * rom_factor * weight_factor
-                            min_rep_angle = 180
+                # ===== SQUAT =====
+                if exercise == "squat":
+                    if landmarks[25].visibility >= landmarks[26].visibility:
+                        knee_angle = smooth_angle(calculate_angle(l_hip, l_knee, l_ankle))
+                        min_rep_angle = min(min_rep_angle, knee_angle)
+                        back_angle = smooth_angle(calculate_angle(l_shoulder, l_hip, l_knee))
+                    else:
+                        knee_angle = smooth_angle(calculate_angle(r_hip, r_knee, r_ankle))
+                        min_rep_angle = min(min_rep_angle, knee_angle)
+                        back_angle = smooth_angle(calculate_angle(r_shoulder, r_hip, r_knee))
 
-                    # ===== PUSH-UP =====
-                    elif exercise == "pushup":
-                        if left_vis >= right_vis:
-                            elbow_angle = smooth_angle(calculate_angle(l_shoulder, l_elbow, l_wrist))
-                        else:
-                            elbow_angle = smooth_angle(calculate_angle(r_shoulder, r_elbow, r_wrist))
+                    posture = "GOOD" if back_angle > 150 else "BAD"
 
+                    if knee_angle < 105:
+                        stage = "DOWN"
+                    elif knee_angle > 158 and stage == "DOWN":
+                        stage = "UP"
+                        record_completed_rep()
+                        rom_factor = max(0.8, min(1.3, (160 - min_rep_angle) / 60))
+                        weight_factor = user_weight / 70
+                        calories += 0.5 * rom_factor * weight_factor
+                        min_rep_angle = 180
+
+                # ===== PUSH-UP =====
+                elif exercise == "pushup":
+                    if left_vis >= right_vis:
+                        elbow_angle = smooth_angle(calculate_angle(l_shoulder, l_elbow, l_wrist))
+                    else:
+                        elbow_angle = smooth_angle(calculate_angle(r_shoulder, r_elbow, r_wrist))
+
+                    posture = "GOOD"
+
+                    if elbow_angle < 90:
+                        stage = "DOWN"
+                    elif elbow_angle > 150 and stage == "DOWN":
+                        stage = "UP"
+                        record_completed_rep()
+                        weight_factor = user_weight / 70
+                        calories += 0.35 * weight_factor
+
+                # ===== JUMPING JACK =====
+                elif exercise == "jumpingjack":
+                    l_hand_y = landmarks[15].y
+                    r_hand_y = landmarks[16].y
+                    shoulder_y = (landmarks[11].y + landmarks[12].y) / 2
+                    leg_dist = abs(landmarks[27].x - landmarks[28].x)
+
+                    hands_up = l_hand_y < (shoulder_y - 0.05) and r_hand_y < (shoulder_y - 0.05)
+                    hands_down = l_hand_y > shoulder_y and r_hand_y > shoulder_y
+
+                    posture = "GOOD"
+
+                    if hands_up and leg_dist > 0.28:
+                        stage = "OPEN"
+                    elif hands_down and leg_dist < 0.22 and stage == "OPEN":
+                        stage = "CLOSE"
+                        record_completed_rep()
+                        weight_factor = user_weight / 70
+                        calories += 0.45 * weight_factor
+
+                # ===== BICEP CURL =====
+                elif exercise == "bicepcurl":
+                    if left_vis >= right_vis:
+                        elbow_angle = smooth_angle(calculate_angle(l_shoulder, l_elbow, l_wrist))
+                    else:
+                        elbow_angle = smooth_angle(calculate_angle(r_shoulder, r_elbow, r_wrist))
+
+                    posture = "GOOD"
+
+                    if elbow_angle > 150:
+                        stage = "DOWN"
+                    elif elbow_angle < 55 and stage == "DOWN":
+                        stage = "UP"
+                        record_completed_rep()
+                        weight_factor = user_weight / 70
+                        calories += 0.25 * weight_factor
+
+                # ===== PLANK =====
+                elif exercise == "plank":
+                    if landmarks[23].visibility >= landmarks[24].visibility:
+                        back_angle = smooth_angle(calculate_angle(l_shoulder, l_hip, l_knee))
+                    else:
+                        back_angle = smooth_angle(calculate_angle(r_shoulder, r_hip, r_knee))
+
+                    if back_angle > 160:
                         posture = "GOOD"
+                        if plank_start_time is None:
+                            plank_start_time = time.time()
+                        elapsed = time.time() - plank_start_time
+                        counter = int(elapsed)
+                        calories = (elapsed / 3600) * 3.5 * user_weight
+                    else:
+                        posture = "BAD"
+                        plank_start_time = None
+        else:
+            posture = "BAD"
 
-                        if elbow_angle < 90:
-                            stage = "DOWN"
-                        elif elbow_angle > 150 and stage == "DOWN":
-                            stage = "UP"
-                            record_completed_rep()
-                            weight_factor = user_weight / 70
-                            calories += 0.35 * weight_factor
-
-                    # ===== JUMPING JACK =====
-                    elif exercise == "jumpingjack":
-                        l_hand_y = landmarks[15].y
-                        r_hand_y = landmarks[16].y
-                        shoulder_y = (landmarks[11].y + landmarks[12].y) / 2
-                        leg_dist = abs(landmarks[27].x - landmarks[28].x)
-
-                        hands_up = l_hand_y < (shoulder_y - 0.05) and r_hand_y < (shoulder_y - 0.05)
-                        hands_down = l_hand_y > shoulder_y and r_hand_y > shoulder_y
-
-                        posture = "GOOD"
-
-                        if hands_up and leg_dist > 0.28:
-                            stage = "OPEN"
-                        elif hands_down and leg_dist < 0.22 and stage == "OPEN":
-                            stage = "CLOSE"
-                            record_completed_rep()
-                            weight_factor = user_weight / 70
-                            calories += 0.45 * weight_factor
-
-                    # ===== BICEP CURL =====
-                    elif exercise == "bicepcurl":
-                        if left_vis >= right_vis:
-                            elbow_angle = smooth_angle(calculate_angle(l_shoulder, l_elbow, l_wrist))
-                        else:
-                            elbow_angle = smooth_angle(calculate_angle(r_shoulder, r_elbow, r_wrist))
-
-                        posture = "GOOD"
-
-                        if elbow_angle > 150:
-                            stage = "DOWN"
-                        elif elbow_angle < 55 and stage == "DOWN":
-                            stage = "UP"
-                            record_completed_rep()
-                            weight_factor = user_weight / 70
-                            calories += 0.25 * weight_factor
-
-                    # ===== PLANK =====
-                    elif exercise == "plank":
-                        if landmarks[23].visibility >= landmarks[24].visibility:
-                            back_angle = smooth_angle(calculate_angle(l_shoulder, l_hip, l_knee))
-                        else:
-                            back_angle = smooth_angle(calculate_angle(r_shoulder, r_hip, r_knee))
-
-                        if back_angle > 160:
-                            posture = "GOOD"
-                            if plank_start_time is None:
-                                plank_start_time = time.time()
-                                elapsed = time.time() - plank_start_time
-                                counter = int(elapsed)
-                                calories = (elapsed / 3600) * 3.5 * user_weight
-                        else:
-                            posture = "BAD"
-                            plank_start_time = None
-
-            if not detected:
-                cv2.putText(
-                    frame,
-                    "Move closer / better lighting",
-                    (20, h - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
-                    (0, 200, 255),
-                    2
-                )
-
-        except Exception as ex:
-            print("Frame error:", ex)
-
-        ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-        if not ret:
-            continue
-
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+    return {
+        "detected": detected,
+        "reps": int(counter),
+        "target_reps": target_reps,
+        "stage": stage,
+        "posture": posture,
+        "exercise": exercise,
+        "calories": round(calories, 2),
+        "last_rep_duration": round(last_rep_duration, 2) if last_rep_duration else None,
+        "long_pause_count": long_pause_count,
+        "bad_form_count": bad_form_count,
+        "struggle_score": struggle_score
+    }
 
 # ================= ROUTES =================
 @app.route("/login")
@@ -396,17 +347,25 @@ def auth_callback():
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("index"))
+    return redirect(url_for("login"))
 @app.route('/')
 def index():
     if "user" not in session:
         return redirect(url_for("login"))
     return render_template('index.html')
 
-@app.route('/video')
-def video():
-    return Response(generate_frames(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+@app.route("/process_frame", methods=["POST"])
+def process_frame():
+    if "user" not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    try:
+        result = process_frame_bytes(request.get_data())
+        if "error" in result:
+            return jsonify(result), 400
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": f"Frame processing failed: {str(e)}"}), 500
 
 @app.route('/set_exercise/<name>')
 def set_exercise(name):
@@ -425,6 +384,33 @@ def set_exercise(name):
     calories = 0.0
     session_active = True
     return "OK"
+
+@app.route("/set_weight", methods=["POST"])
+def set_weight():
+    global user_weight
+    try:
+        data = request.json or {}
+        value = float(data.get("weight", 70))
+        if value < 20 or value > 200:
+            return jsonify({"error": "Weight must be between 20 and 200 kg"}), 400
+
+        user_weight = value
+
+        if "user" in session:
+            workouts_collection.update_one(
+                {"type": "profile", "email": session["user"]["email"]},
+                {"$set": {
+                    "type": "profile",
+                    "email": session["user"]["email"],
+                    "name": session["user"]["name"],
+                    "weight": user_weight
+                }},
+                upsert=True
+            )
+
+        return jsonify({"ok": True, "weight": user_weight})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
 
 @app.route('/reset')
 def reset():
