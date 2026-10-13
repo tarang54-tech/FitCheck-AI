@@ -27,6 +27,14 @@ class FakeTools:
 
 class TestCoachService(unittest.TestCase):
 
+    @patch("coach_service.Groq")
+    @patch.dict(os.environ, {"GROQ_API_KEY": "gsk_test_key"})
+    def test_client_is_created_when_key_is_configured(self, mock_groq):
+        from coach_service import get_groq_client
+        client = get_groq_client()
+        self.assertIs(client, mock_groq.return_value)
+        mock_groq.assert_called_once_with(api_key="gsk_test_key")
+
     def test_empty_message(self):
         reply, code = ask_fitness_coach("")
         self.assertEqual(code, 400)

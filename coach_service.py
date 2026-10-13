@@ -71,6 +71,11 @@ def get_groq_client():
     api_key = _configured_api_key()
     if not api_key:
         return None
+    try:
+        return Groq(api_key=api_key)
+    except Exception as error:
+        logger.error("Failed to initialize Groq client (%s).", type(error).__name__)
+        return None
 
 
 def _agent_error(error):
@@ -182,11 +187,6 @@ def run_fitness_agent(user_message, tools, conversation=None, model=None):
             return {"reply": "I reached the conversation safety limit. Please start a new question.", "status": 429, "tool_activity": activity, "plan": plan, "proposal": proposal}
 
     return {"reply": "I reached the tool-use limit before finishing. Please ask a narrower question.", "status": 429, "tool_activity": activity, "plan": plan, "proposal": proposal}
-    try:
-        return Groq(api_key=api_key)
-    except Exception as error:
-        logger.error("Failed to initialize Groq client (%s).", type(error).__name__)
-        return None
 
 def ask_fitness_coach(user_message, workout_context=None, model=None):
     """
