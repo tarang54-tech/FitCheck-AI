@@ -123,6 +123,16 @@ Open your browser and navigate to `http://localhost:5000`.
 
 ---
 
+## 🤖 Agentic coach
+
+The coach can use a fixed server-side allowlist to read the authenticated user's live workout, saved workout history, safe profile fields, deterministic progress summaries, and to draft plans or propose an exercise change. It cannot run arbitrary code, construct database queries, save plans, or change an exercise through a tool call.
+
+Draft plans appear in the dashboard for review. A plan is written to the dedicated `plans` MongoDB collection only after the signed-in user presses **Save Plan** and the server validates it. Saved plans are always filtered by that user's server-side email.
+
+Recent coach context is kept as the last eight user/assistant messages in process memory. It is not stored in the browser cookie or database, and can be lost on restart or differ between Gunicorn workers.
+
+---
+
 ## ☁️ Deployment on Render
 
 ### Required Environment Variables in Render Dashboard
@@ -133,6 +143,7 @@ Go to your Render Web Service -> **Environment** and add:
 | `SECRET_KEY` | Persistent random secret string (e.g. 32-hex chars) | Flask / Application |
 | `MONGO_URI` | MongoDB Atlas SRV URI with read/write access | MongoDB Atlas |
 | `GROQ_API_KEY` | Valid API key starting with `gsk_` | Groq Cloud |
+| `GROQ_MODEL` | Optional tool-capable Groq model override; defaults to `llama-3.3-70b-versatile` | Groq Cloud |
 | `GOOGLE_CLIENT_ID` | OAuth 2.0 Web Application Client ID | Google Cloud Console |
 | `GOOGLE_CLIENT_SECRET` | OAuth 2.0 Web Application Client Secret | Google Cloud Console |
 | `PORT` | Set automatically by Render (usually `10000`) | Render |

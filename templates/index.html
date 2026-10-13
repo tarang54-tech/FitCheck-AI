@@ -333,6 +333,21 @@
       justify-content: space-between;
     }
 
+    .plan-preview {
+      display: none;
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid rgba(200,241,53,.35);
+      border-radius: 10px;
+      background: rgba(200,241,53,.05);
+      font-size: 11px;
+      line-height: 1.55;
+    }
+
+    .plan-preview h4 { color: var(--accent); margin-bottom: 4px; }
+    .plan-preview ul { padding-left: 16px; margin: 6px 0; }
+    .plan-preview button { margin-top: 7px; padding: 7px 10px; border: 0; border-radius: 7px; background: var(--accent); color: var(--bg); font-weight: 700; cursor: pointer; }
+
     .cal-num {
       font-family: 'Bebas Neue', sans-serif;
       font-size: 38px;
@@ -662,6 +677,7 @@
           >
           <button onclick="sendMessage()">Send</button>
         </div>
+        <div id="plan-preview" class="plan-preview" aria-live="polite"></div>
       </div>
 
       <button class="end-btn" onclick="endSession()">■ &nbsp;End Session</button>
@@ -683,6 +699,7 @@
   let frameInFlight = false;
   let pendingExercise = null;
   let consecutiveErrors = 0;
+  let proposedPlan = null;
 
   const TIPS = {
     squat: { icon:'🏋️', title:'SQUAT TIPS', text:'Step back so hips, knees, and ankles are clearly in camera view (side profile works best).' },
@@ -996,6 +1013,11 @@
           <b>Coach:</b> ${reply}
         </div>
       `;
+      if (data.tool_activity && data.tool_activity.length) {
+        addCoachNote('Used: ' + data.tool_activity.join(', ') + '.');
+      }
+      if (data.plan) showPlanPreview(data.plan);
+      if (data.proposal) addCoachNote('Exercise proposal: ' + data.proposal.exercise + ' — ' + data.proposal.reason + ' Choose it in the dashboard if you agree.');
       chatBox.scrollTop = chatBox.scrollHeight;
     } catch (err) {
       chatBox.innerHTML += `
@@ -1004,6 +1026,56 @@
         </div>
       `;
       chatBox.scrollTop = chatBox.scrollHeight;
+    }
+  }
+
+  function addCoachNote(text) {
+    const note = document.createElement('div');
+    note.className = 'ai-msg';
+    note.textContent = 'Coach: ' + text;
+    document.getElementById('chat-box').appendChild(note);
+  }
+
+  function showPlanPreview(plan) {
+    proposedPlan = plan;
+    const panel = document.getElementById('plan-preview');
+    panel.replaceChildren();
+    const title = document.createElement('h4');
+    title.textContent = 'Draft plan: ' + plan.title;
+    const meta = document.createElement('div');
+    meta.textContent = plan.duration_minutes + ' minutes • Review before saving';
+    const list = document.createElement('ul');
+    (plan.exercises || []).forEach(item => {
+      const row = document.createElement('li');
+      const volume = item.reps ? `${item.sets} × ${item.reps} reps` : `${item.sets} × ${item.duration_seconds}s`;
+      row.textContent = `${item.exercise}: ${volume}; rest ${item.rest_seconds || 0}s — ${item.reminder}`;
+      list.appendChild(row);
+    });
+    const save = document.createElement('button');
+    save.textContent = 'Save Plan';
+    save.onclick = saveProposedPlan;
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Discard';
+    cancel.style.marginLeft = '6px';
+    cancel.style.background = 'transparent';
+    cancel.style.color = 'var(--muted)';
+    cancel.style.border = '1px solid var(--border)';
+    cancel.onclick = () => { proposedPlan = null; panel.style.display = 'none'; };
+    panel.append(title, meta, list, save, cancel);
+    panel.style.display = 'block';
+  }
+
+  async function saveProposedPlan() {
+    if (!proposedPlan || !confirm('Save this reviewed workout plan?')) return;
+    try {
+      const response = await fetch('/plans', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({plan: proposedPlan})});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Plan could not be saved.');
+      addCoachNote('Your workout plan was saved.');
+      proposedPlan = null;
+      document.getElementById('plan-preview').style.display = 'none';
+    } catch (error) {
+      addCoachNote(error.message || 'Plan could not be saved.');
     }
   }
 </script>

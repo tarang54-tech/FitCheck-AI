@@ -3,6 +3,7 @@ import time
 import json
 import logging
 import threading
+from collections import deque
 import numpy as np
 import cv2
 from dotenv import load_dotenv
@@ -13,7 +14,8 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 # Import modular components
 from exercise_tracker import WorkoutSessionState, evaluate_frame_pose, EXERCISE_LANDMARKS
 from db_manager import DatabaseManager
-from coach_service import ask_fitness_coach
+from coach_service import run_fitness_agent
+from agent_tools import FitnessAgentTools, validate_plan
 
 load_dotenv()
 
@@ -86,6 +88,10 @@ except Exception as e:
 # Maps user_key (email or session id) -> WorkoutSessionState
 user_sessions = {}
 sessions_lock = threading.Lock()
+# Process-local, bounded coach memory. It is intentionally not stored in the
+# signed Flask cookie and may be lost after a restart or differ across workers.
+coach_conversations = {}
+coach_conversations_lock = threading.Lock()
 
 def get_current_user_key():
     """Identifies current session owner securely."""
@@ -206,6 +212,8 @@ def logout():
     with sessions_lock:
         if user_key in user_sessions:
             del user_sessions[user_key]
+    with coach_conversations_lock:
+        coach_conversations.pop(user_key, None)
     session.clear()
     return redirect(url_for("login"))
 
@@ -246,6 +254,7 @@ def process_frame():
         if not detection_result.pose_landmarks:
             # Body not detected in frame
             config = EXERCISE_LANDMARKS.get(user_state.exercise, EXERCISE_LANDMARKS["squat"])
+            user_state.tracking_status = {"detected": False, "visibility_ok": False, "missing_landmarks": config["required"]}
             return jsonify({
                 "detected": False,
                 "reps": int(user_state.counter),
@@ -261,6 +270,11 @@ def process_frame():
         # Person detected: run exercise evaluation
         landmarks = detection_result.pose_landmarks[0]
         diag = evaluate_frame_pose(user_state, landmarks, now=time.time())
+        user_state.tracking_status = {
+            "detected": True,
+            "visibility_ok": diag.get("visibility_ok"),
+            "missing_landmarks": diag.get("missing_landmarks", []),
+        }
 
         resp = user_state.to_dict()
         resp["detected"] = True
@@ -392,15 +406,49 @@ def chat():
 
     user_key = get_current_user_key()
     user_state = get_user_state(user_key)
-    workout_ctx = {
-        "exercise": user_state.exercise,
-        "reps": user_state.counter,
-        "posture": user_state.posture,
-        "calories": user_state.calories
-    }
+    with coach_conversations_lock:
+        conversation = list(coach_conversations.get(user_key, deque(maxlen=8)))
+    tools = FitnessAgentTools(
+        user_email=session["user"]["email"],
+        user_state=user_state,
+        db_manager=db_manager,
+        tracking_status=getattr(user_state, "tracking_status", {}),
+    )
+    result = run_fitness_agent(user_message, tools, conversation=conversation)
+    if result["status"] == 200:
+        with coach_conversations_lock:
+            memory = coach_conversations.setdefault(user_key, deque(maxlen=8))
+            memory.append({"role": "user", "content": str(user_message)[:1200]})
+            memory.append({"role": "assistant", "content": result["reply"][:1200]})
+    return jsonify({
+        "reply": result["reply"],
+        "tool_activity": result["tool_activity"],
+        "plan": result["plan"],
+        "proposal": result["proposal"],
+    }), result["status"]
 
-    reply, code = ask_fitness_coach(user_message, workout_ctx)
-    return jsonify({"reply": reply}), code
+@app.route("/plans", methods=["GET"])
+def get_plans():
+    if "user" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    plans = db_manager.get_user_plans(session["user"]["email"], limit=10)
+    if plans is None:
+        return jsonify({"error": "Saved plans are unavailable because the database is not connected."}), 503
+    return jsonify({"plans": plans})
+
+@app.route("/plans", methods=["POST"])
+def save_plan():
+    """Persist only a plan explicitly submitted by the authenticated user."""
+    if "user" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    plan, error = validate_plan((request.get_json(silent=True) or {}).get("plan"))
+    if error:
+        return jsonify({"error": error}), 400
+    if not db_manager.is_connected:
+        return jsonify({"error": "Plan was not saved because the database is unavailable."}), 503
+    if not db_manager.save_user_plan(session["user"]["email"], plan):
+        return jsonify({"error": "Plan could not be saved."}), 503
+    return jsonify({"ok": True, "plan": plan}), 201
 
 @app.route("/health")
 def health():

@@ -17,6 +17,7 @@ class DatabaseManager:
         self.db = None
         self.workouts = None
         self.profiles = None
+        self.plans = None
         self.is_connected = False
         self._init_connection()
 
@@ -40,6 +41,7 @@ class DatabaseManager:
             # Two distinct collections to prevent any accidental deletion of user profiles
             self.workouts = self.db["workouts"]
             self.profiles = self.db["profiles"]
+            self.plans = self.db["plans"]
             self.is_connected = True
             logger.info("MongoDB connected successfully.")
         except Exception as e:
@@ -132,3 +134,31 @@ class DatabaseManager:
         except Exception as e:
             logger.error("Error clearing user workouts: %s", e)
             return False
+
+    def save_user_plan(self, user_email, plan):
+        """Save a validated plan for one user without touching workouts or profiles."""
+        if not self.is_connected or not user_email or self.plans is None or not isinstance(plan, dict):
+            return False
+        try:
+            self.plans.insert_one({
+                "user_email": user_email,
+                "title": plan["title"],
+                "duration_minutes": plan["duration_minutes"],
+                "exercises": plan["exercises"],
+                "created_at": time.time(),
+            })
+            return True
+        except Exception as e:
+            logger.error("Error saving workout plan: %s", e)
+            return False
+
+    def get_user_plans(self, user_email, limit=10):
+        """Read saved plans belonging only to the authenticated user."""
+        if not self.is_connected or not user_email or self.plans is None:
+            return None
+        try:
+            cursor = self.plans.find({"user_email": user_email}, {"_id": 0, "user_email": 0}).sort("created_at", -1).limit(min(max(int(limit), 1), 20))
+            return list(cursor)
+        except Exception as e:
+            logger.error("Error fetching workout plans: %s", e)
+            return None

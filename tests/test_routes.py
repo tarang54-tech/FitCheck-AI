@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, ANY
 import json
 import os
 
@@ -107,9 +107,9 @@ class TestAppRoutes(unittest.TestCase):
         res = self.client.post("/process_frame", data=b"not-an-image")
         self.assertEqual(res.status_code, 400)
 
-    @patch("app.ask_fitness_coach")
-    def test_chat_delegation(self, mock_ask):
-        mock_ask.return_value = ("Keep your back straight!", 200)
+    @patch("app.run_fitness_agent")
+    def test_chat_delegation(self, mock_agent):
+        mock_agent.return_value = {"reply": "Keep your back straight!", "status": 200, "tool_activity": ["get_current_workout"], "plan": None, "proposal": None}
 
         with self.client.session_transaction() as sess:
             sess["user"] = {"name": "Test User", "email": "test@example.com"}
@@ -118,6 +118,31 @@ class TestAppRoutes(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = json.loads(res.data)
         self.assertIn("Keep your back straight!", data["reply"])
+        self.assertEqual(data["tool_activity"], ["get_current_workout"])
+
+    def test_plan_endpoints_require_login(self):
+        self.assertEqual(self.client.get("/plans").status_code, 401)
+        self.assertEqual(self.client.post("/plans", json={"plan": {}}).status_code, 401)
+
+    @patch("app.db_manager")
+    def test_plan_saves_only_after_explicit_post(self, mock_db):
+        mock_db.is_connected = True
+        mock_db.save_user_plan.return_value = True
+        with self.client.session_transaction() as sess:
+            sess["user"] = {"name": "Plan User", "email": "plans@example.com"}
+        plan = {"title": "Quick plan", "duration_minutes": 15, "exercises": [{"exercise": "squat", "sets": 2, "reps": 8, "rest_seconds": 60}]}
+        response = self.client.post("/plans", json={"plan": plan})
+        self.assertEqual(response.status_code, 201)
+        mock_db.save_user_plan.assert_called_once_with("plans@example.com", ANY)
+
+    @patch("app.db_manager")
+    def test_plan_retrieval_is_authorized_and_user_scoped(self, mock_db):
+        mock_db.get_user_plans.return_value = [{"title": "My plan", "duration_minutes": 15, "exercises": []}]
+        with self.client.session_transaction() as sess:
+            sess["user"] = {"name": "Plan User", "email": "plans@example.com"}
+        response = self.client.get("/plans")
+        self.assertEqual(response.status_code, 200)
+        mock_db.get_user_plans.assert_called_once_with("plans@example.com", limit=10)
 
     def test_health_check(self):
         res = self.client.get("/health")
