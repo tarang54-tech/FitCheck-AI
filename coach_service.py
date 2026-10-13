@@ -12,14 +12,58 @@ RECOMMENDED_MODELS = [
     "llama-3.3-70b-versatile"
 ]
 
+
+def _configured_api_key():
+    """Read the key without ever logging or returning its value."""
+    return os.getenv("GROQ_API_KEY", "").strip()
+
+
+def _error_status(error):
+    """Extract an HTTP status from Groq SDK exceptions or test doubles."""
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int):
+        return status
+    text = str(error).lower()
+    for code in (401, 403, 404, 408, 429, 500, 502, 503, 504):
+        if str(code) in text:
+            return code
+    return None
+
+
+def check_groq_credentials():
+    """Safely validate the configured key for use from an admin shell.
+
+    This is deliberately not exposed by Flask. Its result never includes the
+    key, headers, or provider error text.
+    """
+    if not _configured_api_key():
+        return {"configured": False, "accepted": False, "status": "missing"}
+
+    client = get_groq_client()
+    if client is None:
+        return {"configured": True, "accepted": False, "status": "client_error"}
+
+    try:
+        client.models.list()
+        return {"configured": True, "accepted": True, "status": "accepted"}
+    except Exception as error:
+        status = _error_status(error)
+        logger.warning("Groq credential check failed with status %s.", status or "unknown")
+        return {
+            "configured": True,
+            "accepted": False,
+            "status": "rejected" if status == 401 else "unavailable",
+            "http_status": status,
+        }
+
 def get_groq_client():
-    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    api_key = _configured_api_key()
     if not api_key:
         return None
     try:
         return Groq(api_key=api_key)
-    except Exception as e:
-        logger.error("Failed to initialize Groq client: %s", e)
+    except Exception as error:
+        logger.error("Failed to initialize Groq client (%s).", type(error).__name__)
         return None
 
 def ask_fitness_coach(user_message, workout_context=None, model=None):
@@ -31,7 +75,7 @@ def ask_fitness_coach(user_message, workout_context=None, model=None):
     if not user_msg:
         return "Please provide a question or workout topic.", 400
 
-    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    api_key = _configured_api_key()
     if not api_key:
         logger.warning("GROQ_API_KEY is not configured.")
         return "AI Coach is currently unconfigured. Please ensure GROQ_API_KEY is set in your environment.", 503
@@ -63,8 +107,6 @@ Provide practical, scientifically sound, concise fitness or technique guidance (
 
     # Model resolution: try preferred or fallbacks
     models_to_try = [model] if model else RECOMMENDED_MODELS
-    last_error = ""
-
     for target_model in models_to_try:
         try:
             completion = client.chat.completions.create(
@@ -81,21 +123,32 @@ Provide practical, scientifically sound, concise fitness or technique guidance (
             if reply:
                 return reply, 200
 
-        except Exception as e:
-            err_str = str(e)
-            last_error = err_str
-            logger.error("Groq API error with model %s: %s", target_model, err_str)
+        except Exception as error:
+            status = _error_status(error)
+            error_text = str(error).lower()
+            logger.warning(
+                "Groq completion failed for model %s with status %s.",
+                target_model,
+                status or "unknown",
+            )
 
-            # Check for invalid key
-            if "401" in err_str or "Invalid API Key" in err_str or "Unauthorized" in err_str:
+            # Authentication failures cannot be repaired by trying another model.
+            if status == 401 or "invalid api key" in error_text or "unauthorized" in error_text:
                 return "AI Coach authentication failed: The provided GROQ_API_KEY is invalid or unauthorized. Please verify your Groq API key in your environment variables.", 401
 
-            # Check for rate limit or quota
-            if "429" in err_str or "rate limit" in err_str.lower():
+            if status == 429 or "rate limit" in error_text:
                 return "The AI Coach is experiencing high demand right now. Please wait a moment and try again.", 429
 
-            # If model not found, loop to next fallback model
-            if "model" in err_str.lower() and ("not found" in err_str.lower() or "decommissioned" in err_str.lower()):
+            # A model-specific failure may be resolved by the next allowed model.
+            model_error = "model" in error_text and (
+                status in (400, 403, 404) or "not found" in error_text or "decommissioned" in error_text
+            )
+            if model_error:
                 continue
 
-    return f"AI Coach temporarily unavailable. ({last_error[:100]})", 502
+            # Connection, timeout, and server failures are temporary; do not fan
+            # out the same failed request to every model.
+            if status in (408, 500, 502, 503, 504) or "timeout" in error_text or "connection" in error_text:
+                return "AI Coach is temporarily unavailable. Please try again shortly.", 503
+
+    return "AI Coach is temporarily unavailable. Please try again shortly.", 502
