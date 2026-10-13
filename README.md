@@ -1,189 +1,159 @@
 # 🏋️ FitCheck AI
 
-FitCheck AI is an AI-powered fitness assistant that uses real-time computer vision to track exercises, count repetitions, analyze posture, estimate calories burned, and provide fitness guidance.
+FitCheck AI is an intelligent computer-vision fitness assistant that uses real-time pose tracking to detect exercise movements, count repetitions accurately, analyze posture, estimate calories burned, persist workout history, and provide an AI fitness coach powered by Groq.
 
-The application uses **MediaPipe Pose Landmarker** to detect body landmarks through the user's webcam and analyzes joint angles to identify different stages of an exercise.
+The application captures video frames from the user's browser, applies **MediaPipe Pose Landmarker**, evaluates joint angles using independent angle smoothing and robust state machines, and provides real-time body framing guidance.
+
+---
 
 ## ✨ Features
 
-- 📷 Real-time webcam-based pose detection
-- 🔢 Automatic repetition counting
-- 🧍 Posture analysis and feedback
-- 🔥 Estimated calorie tracking based on user weight
-- 📊 Workout session history
-- 🤖 AI-powered fitness coach
-- 🏃 Support for multiple exercises
+- 📷 **Real-time browser webcam pose tracking** with MediaPipe Pose Landmarker Heavy.
+- 🔢 **Deterministic repetition counting** with dedicated state machines for Squats, Push-ups, Jumping Jacks, and Bicep Curls.
+- 🧘 **Plank timer & posture tracking** that counts elapsed hold time only while proper body alignment is maintained.
+- 📐 **Independent angle smoothing** preventing joint cross-talk between knees, elbows, and back angles.
+- 🧍 **Real-time body framing guidance** indicating when key joints are out of frame or obscured.
+- 🔒 **User isolation & atomic MongoDB persistence** separating user profiles from workout session history.
+- 🤖 **AI Fitness Coach** powered by Groq (Llama 3.3 70B & fast fallbacks) with context-aware exercise guidance and robust error handling.
+- 🔐 **Google OAuth 2.0 authentication** with CSRF state protection and HTTPS reverse proxy compatibility.
 
-### Supported Exercises
+---
 
-- Squats
-- Push-ups
-- Jumping Jacks
-- Bicep Curls
-- Plank
+## 🏃 Supported Exercises & Movement Cycles
 
-## 🧠 How It Works
+| Exercise | Primary Joints Tracked | Movement State Cycle | Good Posture Criteria |
+| :--- | :--- | :--- | :--- |
+| **Squats** | Hip, Knee, Ankle | `UP` -> `DOWN` (knee < 110°) -> `UP` (knee > 155°) | Torso/back angle ≥ 145° (chest up) |
+| **Push-ups** | Shoulder, Elbow, Wrist | `UP` -> `DOWN` (elbow < 90°) -> `UP` (elbow > 150°) | Body line (shoulder-hip-ankle) ≥ 150° |
+| **Bicep Curls** | Shoulder, Elbow, Wrist | `DOWN` -> `UP` (elbow < 60°) -> `DOWN` (elbow > 145°) | Controlled upper arm movement |
+| **Jumping Jacks** | Wrist, Shoulder, Ankle | `CLOSE` -> `OPEN` (hands up + feet wide) -> `CLOSE` | Synchronized full range of motion |
+| **Plank** | Shoulder, Hip, Ankle | Active hold timer (seconds) | Straight body alignment (158° – 180°) |
 
-FitCheck AI captures video from the user's webcam and processes each frame using **MediaPipe Pose Landmarker**.
+---
 
-Body landmarks such as the shoulders, elbows, hips, knees, ankles, and wrists are detected.
+## 🛠️ Technology Stack
 
-The application calculates joint angles from these landmarks and uses exercise-specific rules to determine the current movement stage.
+- **Backend:** Python 3.11, Flask, Gunicorn
+- **Computer Vision:** OpenCV, MediaPipe Pose Landmarker, NumPy
+- **Frontend:** Vanilla HTML5, CSS3, modern asynchronous JavaScript
+- **Database:** MongoDB Atlas (PyMongo) with isolated profile and workout collections
+- **Authentication:** Google OAuth via Authlib & Flask Session
+- **AI Coach:** Groq Cloud API (`llama-3.3-70b-versatile`)
+- **Deployment:** Render (Docker / Linux container)
 
-For example, during a squat:
+---
 
-1. The hip, knee, and ankle landmarks are detected.
-2. The knee angle is calculated.
-3. A sufficiently low knee angle identifies the downward phase.
-4. Returning to the standing position completes the repetition.
-5. The repetition counter is increased.
-
-Similar movement logic is used for the other supported exercises.
-
-## 🛠️ Technologies Used
-
-### Backend
-
-- Python
-- Flask
-
-### Computer Vision
-
-- OpenCV
-- MediaPipe
-- NumPy
-
-### Frontend
-
-- HTML
-- CSS
-- JavaScript
-
-### AI Integration
-
-- Groq API
-- Llama 3.3 70B
-
-## 📁 Project Structure
+## 📁 Repository Structure
 
 ```text
 FitCheck-AI/
-│
-├── app.py
-├── data.json
-├── pose_landmarker_heavy.task
-├── requirements.txt
-├── .gitignore
-│
-└── templates/
-    └── index.html
+├── app.py                     # Main Flask web application, route handlers & session tracking
+├── exercise_tracker.py        # Independent angle smoothing, visibility checks & exercise state machines
+├── db_manager.py              # MongoDB Atlas connection manager & atomic profile/history isolation
+├── coach_service.py           # Groq API client with context injection and fallback models
+├── pose_landmarker_heavy.task # MediaPipe Pose Landmarker binary model
+├── requirements.txt           # Python dependencies
+├── Dockerfile                 # Render container configuration
+├── .env.example               # Environment variables template
+├── templates/
+│   └── index.html             # Dashboard UI with live video, framing hints & AI chat
+└── tests/
+    ├── test_exercise_tracker.py
+    ├── test_coach_service.py
+    ├── test_db_manager.py
+    └── test_routes.py
 ```
 
-## 🚀 Installation
+---
 
-### 1. Clone the repository
+## 🚀 Local Setup & Development
 
+### 1. Prerequisites
+- Python 3.11 installed
+- Git installed
+- A webcam connected to your computer
+
+### 2. Clone the repository
 ```bash
 git clone https://github.com/tarang54-tech/FitCheck-AI.git
-```
-
-Move into the project directory:
-
-```bash
 cd FitCheck-AI
 ```
 
-### 2. Create a virtual environment
-
+### 3. Create a virtual environment
 ```bash
+# On Windows
 python -m venv venv
-```
-
-Activate it on Windows:
-
-```bash
 venv\Scripts\activate
+
+# On macOS/Linux
+python3 -m venv venv
+source venv/bin/activate
 ```
 
-### 3. Install dependencies
-
+### 4. Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Configure the Groq API key
-
-Create a `.env` file inside the project directory:
-
-```text
-GROQ_API_KEY=your_groq_api_key
+### 5. Configure environment variables
+Copy `.env.example` to `.env` and fill in your credentials:
+```bash
+cp .env.example .env
 ```
 
-The `.env` file is excluded from Git using `.gitignore`, so API credentials are not stored in the repository.
+Set the following variables inside `.env`:
+- `SECRET_KEY`: A random secret key for Flask sessions.
+- `MONGO_URI`: Your MongoDB Atlas cluster connection string.
+- `GROQ_API_KEY`: Your API key from [Groq Console](https://console.groq.com/keys).
+- `GOOGLE_CLIENT_ID`: Your Google OAuth 2.0 Web Client ID.
+- `GOOGLE_CLIENT_SECRET`: Your Google OAuth 2.0 Web Client Secret.
 
-### 5. Run FitCheck AI
+> **Local Google OAuth Redirect URI:** In Google Cloud Console, add `http://localhost:5000/login/callback` (or `http://127.0.0.1:5000/login/callback`) to your Authorized Redirect URIs.
 
+### 6. Run automated tests
+```bash
+python -m unittest discover -s tests
+```
+
+### 7. Start the application
 ```bash
 python app.py
 ```
+Open your browser and navigate to `http://localhost:5000`.
 
-Open the local Flask address shown in the terminal, typically:
+---
 
+## ☁️ Deployment on Render
+
+### Required Environment Variables in Render Dashboard
+Go to your Render Web Service -> **Environment** and add:
+
+| Variable | Description | Provider |
+| :--- | :--- | :--- |
+| `SECRET_KEY` | Persistent random secret string (e.g. 32-hex chars) | Flask / Application |
+| `MONGO_URI` | MongoDB Atlas SRV URI with read/write access | MongoDB Atlas |
+| `GROQ_API_KEY` | Valid API key starting with `gsk_` | Groq Cloud |
+| `GOOGLE_CLIENT_ID` | OAuth 2.0 Web Application Client ID | Google Cloud Console |
+| `GOOGLE_CLIENT_SECRET` | OAuth 2.0 Web Application Client Secret | Google Cloud Console |
+| `PORT` | Set automatically by Render (usually `10000`) | Render |
+
+### Google OAuth Redirect URI for Render
+In Google Cloud Console under your OAuth 2.0 Client ID settings, add your Render domain callback to **Authorized redirect URIs**:
 ```text
-http://127.0.0.1:5000
+https://<your-service-name>.onrender.com/login/callback
 ```
+*(e.g., `https://fitcheck-ai-l34e.onrender.com/login/callback`)*
 
-Allow camera access when required.
+---
 
-## 🤖 AI Fitness Coach
+## 🧪 Testing Checklist
 
-FitCheck AI includes an AI fitness assistant that can provide concise workout guidance based on the current exercise session.
-
-The assistant can access information such as:
-
-- Current exercise
-- Repetition count
-- Current posture status
-- Estimated calories burned
-
-This allows the chatbot to provide advice relevant to the ongoing workout.
-
-## 🔥 Calorie Estimation
-
-FitCheck AI provides an estimated calorie count based on factors including:
-
-- Exercise performed
-- Number of repetitions or exercise duration
-- User body weight
-- Exercise movement characteristics
-
-The calorie values are estimates and should not be considered medical measurements.
-
-## 🎯 Project Objective
-
-The goal of FitCheck AI is to explore how computer vision and AI can be combined to create an interactive fitness assistant that provides real-time exercise tracking without requiring dedicated wearable hardware.
-
-## 🔮 Future Improvements
-
-Possible future additions include:
-
-- More exercises
-- Improved posture classification
-- User authentication
-- Personal workout profiles
-- Workout analytics and progress graphs
-- Database-based workout history
-- More advanced calorie estimation
-- Personalized AI workout plans
-- Improved exercise-form feedback
-
-## ⚠️ Disclaimer
-
-FitCheck AI is an educational project and is not intended to provide medical advice or replace professional fitness guidance.
-
-## 👨‍💻 Author
-
-Developed by **Tarang**
-
-Computer Science Engineering Student  
-VIT Chennai
+- [x] **Squats:** Verify knee angle calculation, rep count increment on complete cycle (UP -> DOWN -> UP), and chest form check.
+- [x] **Push-ups:** Verify elbow angle calculation, rep count increment on complete cycle (UP -> DOWN -> UP), and straight body line check.
+- [x] **Bicep Curls:** Verify start in DOWN, curl to UP, and completion upon return to DOWN.
+- [x] **Jumping Jacks:** Verify CLOSE -> OPEN -> CLOSE movement cycle.
+- [x] **Plank:** Verify active second timer when body alignment is good; verify pause/hold when posture sags or peaks.
+- [x] **Framing Guidance:** Verify clear message when stepping partially out of frame.
+- [x] **AI Fitness Coach:** Verify response formatting, context injection, and graceful handling of missing or invalid API keys.
+- [x] **Database Isolation:** Verify user workouts save to user's history and do not delete unrelated user collections or profiles.
+- [x] **Google OAuth:** Verify login redirect, token exchange, and persistent profile weight retrieval.

@@ -1,521 +1,415 @@
-from pymongo import MongoClient
-from flask import Flask, render_template, Response, jsonify, request, redirect, url_for, session
-import cv2
-import mediapipe as mp
-import numpy as np
-import threading
+import os
 import time
 import json
-import os
+import logging
+import threading
+import numpy as np
+import cv2
 from dotenv import load_dotenv
-from groq import Groq
+from flask import Flask, render_template, Response, jsonify, request, redirect, url_for, session
 from authlib.integrations.flask_client import OAuth
-load_dotenv()
-mongo_client = MongoClient(os.getenv("MONGO_URI"))
-db = mongo_client["fitcheck"]
-workouts_collection = db["workouts"]
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-try:
-    mongo_client.admin.command("ping")
-    print("MongoDB connected successfully!")
-except Exception as e:
-    print("MongoDB connection error:", e)
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
+# Import modular components
+from exercise_tracker import WorkoutSessionState, evaluate_frame_pose, EXERCISE_LANDMARKS
+from db_manager import DatabaseManager
+from coach_service import ask_fitness_coach
+
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logger = logging.getLogger("fitcheck.app")
 
 app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "fitcheck-secret-key")
+# Ensure ProxyFix is applied so redirect_uri generates HTTPS behind Render reverse proxies
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1, x_prefix=1)
 
+# Secret key validation
+configured_secret = os.getenv("SECRET_KEY")
+if not configured_secret:
+    logger.warning("SECRET_KEY environment variable is not set. Generating temporary key for current runtime.")
+app.secret_key = configured_secret or os.urandom(24).hex()
+
+# Session cookie security settings
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.getenv("RENDER") is not None or os.getenv("FLASK_ENV") == "production"
+)
+
+# Initialize Database Manager
+db_manager = DatabaseManager()
+
+# OAuth Configuration
 oauth = OAuth(app)
+google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
 
-google = oauth.register(
-    name="google",
-    client_id=os.getenv("GOOGLE_CLIENT_ID"),
-    client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-    server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
-    client_kwargs={
-        "scope": "openid email profile"
-    }
-)
-client = Groq(
-    api_key=os.getenv("GROQ_API_KEY")
-)
-counter = 0
-stage = "UP"
-posture = "GOOD"
-exercise = "squat"
-history = []
-calories = 0.0
-user_weight = 70
-min_rep_angle = 180
-last_rep_time = None
-angle_buffer = []
-plank_start_time = None
-session_active = True
-
-target_reps = 10
-rep_times = []
-last_rep_timestamp = None
-long_pause_count = 0
-bad_form_count = 0
-struggle_score = 0
-last_rep_duration = None
-
-frame_lock = threading.Lock()
-last_detection_timestamp = 0
-
-# ================= MODEL =================
-base_options = python.BaseOptions(model_asset_path='pose_landmarker_heavy.task')
-options = vision.PoseLandmarkerOptions(
-    base_options=base_options,
-    running_mode=vision.RunningMode.VIDEO
-)
-detector = vision.PoseLandmarker.create_from_options(options)
-
-# ================= STORAGE =================
-def save_history():
-    workouts_collection.delete_many({})
-
-    if history:
-        workouts_collection.insert_many(history)
-
-
-def load_history():
-    global history
-
-    history = list(
-        workouts_collection.find(
-            {},
-            {"_id": 0}
-        )
+if google_client_id and google_client_secret:
+    google = oauth.register(
+        name="google",
+        client_id=google_client_id,
+        client_secret=google_client_secret,
+        server_metadata_url="https://accounts.google.com/.well-known/openid-configuration",
+        client_kwargs={
+            "scope": "openid email profile"
+        }
     )
+else:
+    google = None
+    logger.warning("Google OAuth credentials missing. Login route will show helpful guidance.")
 
+# MediaPipe Pose Model
+detector = None
+detector_lock = threading.Lock()
+try:
+    import mediapipe as mp
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
 
-load_history()
+    model_path = os.getenv("POSE_MODEL_PATH", "pose_landmarker_heavy.task")
+    if os.path.exists(model_path):
+        base_options = python.BaseOptions(model_asset_path=model_path)
+        options = vision.PoseLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.VIDEO
+        )
+        detector = vision.PoseLandmarker.create_from_options(options)
+        logger.info("MediaPipe PoseLandmarker loaded successfully.")
+    else:
+        logger.error("Pose model file not found at %s", model_path)
+except Exception as e:
+    logger.error("Error initializing MediaPipe PoseLandmarker: %s", e)
 
-# ================= HELPERS =================
-def calculate_angle(a, b, c):
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    radians = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
-    angle = np.abs(radians * 180.0 / np.pi)
-    return 360 - angle if angle > 180 else angle
+# Isolated User Session Store
+# Maps user_key (email or session id) -> WorkoutSessionState
+user_sessions = {}
+sessions_lock = threading.Lock()
 
-def smooth_angle(angle):
-    global angle_buffer
-    angle_buffer.append(angle)
-    if len(angle_buffer) > 5:
-        angle_buffer.pop(0)
-    return sum(angle_buffer) / len(angle_buffer)
-def record_completed_rep():
-    global counter, last_rep_timestamp, last_rep_duration
-    global rep_times, long_pause_count, bad_form_count, struggle_score
+def get_current_user_key():
+    """Identifies current session owner securely."""
+    if "user" in session and session["user"].get("email"):
+        return session["user"]["email"]
+    if "anonymous_id" not in session:
+        session["anonymous_id"] = os.urandom(12).hex()
+    return session["anonymous_id"]
 
-    now = time.time()
+def get_user_state(user_key):
+    """Retrieves or creates isolated workout state for a user."""
+    with sessions_lock:
+        if user_key not in user_sessions:
+            initial_weight = 70.0
+            if "user" in session and session["user"].get("email"):
+                prof = db_manager.get_user_profile(session["user"]["email"])
+                if prof and "weight" in prof:
+                    initial_weight = float(prof["weight"])
+            user_sessions[user_key] = WorkoutSessionState(exercise="squat", user_weight=initial_weight)
+        return user_sessions[user_key]
 
-    if last_rep_timestamp is not None:
-        duration = now - last_rep_timestamp
-        last_rep_duration = duration
-        rep_times.append(duration)
+# Tracking timestamp for video inference
+last_detection_timestamp = 0
+timestamp_lock = threading.Lock()
 
-        if duration > 5:
-            long_pause_count += 1
-
-        if len(rep_times) >= 3:
-            previous_average = sum(rep_times[:-1]) / len(rep_times[:-1])
-
-            if duration > previous_average * 1.5:
-                struggle_score = min(100, struggle_score + 10)
-
-    last_rep_timestamp = now
-
-    if posture == "BAD":
-        bad_form_count += 1
-        struggle_score = min(100, struggle_score + 15)
-
-    counter += 1
-
-def lm(landmarks, idx):
-    return [landmarks[idx].x, landmarks[idx].y]
-
-def session_summary(ex_name, count, cal, posture_state):
-    if ex_name == "squat":
-        return f"Squats * {count} | {round(cal,1)} kcal | {posture_state}"
-    elif ex_name == "pushup":
-        return f"Push-ups * {count} | {round(cal,1)} kcal | {posture_state}"
-    elif ex_name == "jumpingjack":
-        return f"Jumping Jacks * {count} | {round(cal,1)} kcal | {posture_state}"
-    elif ex_name == "bicepcurl":
-        return f"Bicep Curls * {count} | {round(cal,1)} kcal | {posture_state}"
-    elif ex_name == "plank":
-        return f"Plank * {count} sec | {round(cal,1)} kcal | {posture_state}"
-    return f"{ex_name} * {count} | {round(cal,1)} kcal | {posture_state}"
-
-VISIBILITY_MAP = {
-    "squat": [11, 23, 25, 27],
-    "pushup": [11, 13, 15],
-    "jumpingjack": [11, 12, 13, 15, 16],
-    "bicepcurl": [11, 13, 15],
-    "plank": [11, 23, 25],
-}
-
-def visibility_ok(landmarks, exercise_name, threshold=0.35):
-    indices = VISIBILITY_MAP.get(exercise_name, [11, 13, 15])
-    return all(landmarks[i].visibility >= threshold for i in indices)
-
-# ================= BROWSER FRAME PROCESSING =================
-def process_frame_bytes(frame_bytes):
-    global counter, stage, posture, exercise, calories, plank_start_time, session_active
-    global min_rep_angle, user_weight, last_detection_timestamp
-
-    if not frame_bytes:
-        return {"error": "Empty frame"}
-
-    np_buffer = np.frombuffer(frame_bytes, dtype=np.uint8)
-    frame = cv2.imdecode(np_buffer, cv2.IMREAD_COLOR)
-
-    if frame is None:
-        return {"error": "Invalid frame"}
-
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-
-    timestamp_ms = int(time.time() * 1000)
-    if timestamp_ms <= last_detection_timestamp:
-        timestamp_ms = last_detection_timestamp + 1
-    last_detection_timestamp = timestamp_ms
-
-    detected = False
-
-    with frame_lock:
-        result = detector.detect_for_video(mp_image, timestamp_ms)
-
-        if result.pose_landmarks:
-            landmarks = result.pose_landmarks[0]
-
-            if session_active and visibility_ok(landmarks, exercise):
-                detected = True
-
-                l_shoulder = lm(landmarks, 11)
-                l_hip = lm(landmarks, 23)
-                l_knee = lm(landmarks, 25)
-                l_ankle = lm(landmarks, 27)
-                l_elbow = lm(landmarks, 13)
-                l_wrist = lm(landmarks, 15)
-
-                r_shoulder = lm(landmarks, 12)
-                r_hip = lm(landmarks, 24)
-                r_knee = lm(landmarks, 26)
-                r_ankle = lm(landmarks, 28)
-                r_elbow = lm(landmarks, 14)
-                r_wrist = lm(landmarks, 16)
-
-                left_vis = landmarks[13].visibility
-                right_vis = landmarks[14].visibility
-
-                # ===== SQUAT =====
-                if exercise == "squat":
-                    if landmarks[25].visibility >= landmarks[26].visibility:
-                        knee_angle = smooth_angle(calculate_angle(l_hip, l_knee, l_ankle))
-                        min_rep_angle = min(min_rep_angle, knee_angle)
-                        back_angle = smooth_angle(calculate_angle(l_shoulder, l_hip, l_knee))
-                    else:
-                        knee_angle = smooth_angle(calculate_angle(r_hip, r_knee, r_ankle))
-                        min_rep_angle = min(min_rep_angle, knee_angle)
-                        back_angle = smooth_angle(calculate_angle(r_shoulder, r_hip, r_knee))
-
-                    posture = "GOOD" if back_angle > 150 else "BAD"
-
-                    if knee_angle < 105:
-                        stage = "DOWN"
-                    elif knee_angle > 158 and stage == "DOWN":
-                        stage = "UP"
-                        record_completed_rep()
-                        rom_factor = max(0.8, min(1.3, (160 - min_rep_angle) / 60))
-                        weight_factor = user_weight / 70
-                        calories += 0.5 * rom_factor * weight_factor
-                        min_rep_angle = 180
-
-                # ===== PUSH-UP =====
-                elif exercise == "pushup":
-                    if left_vis >= right_vis:
-                        elbow_angle = smooth_angle(calculate_angle(l_shoulder, l_elbow, l_wrist))
-                    else:
-                        elbow_angle = smooth_angle(calculate_angle(r_shoulder, r_elbow, r_wrist))
-
-                    posture = "GOOD"
-
-                    if elbow_angle < 90:
-                        stage = "DOWN"
-                    elif elbow_angle > 150 and stage == "DOWN":
-                        stage = "UP"
-                        record_completed_rep()
-                        weight_factor = user_weight / 70
-                        calories += 0.35 * weight_factor
-
-                # ===== JUMPING JACK =====
-                elif exercise == "jumpingjack":
-                    l_hand_y = landmarks[15].y
-                    r_hand_y = landmarks[16].y
-                    shoulder_y = (landmarks[11].y + landmarks[12].y) / 2
-                    leg_dist = abs(landmarks[27].x - landmarks[28].x)
-
-                    hands_up = l_hand_y < (shoulder_y - 0.05) and r_hand_y < (shoulder_y - 0.05)
-                    hands_down = l_hand_y > shoulder_y and r_hand_y > shoulder_y
-
-                    posture = "GOOD"
-
-                    if hands_up and leg_dist > 0.28:
-                        stage = "OPEN"
-                    elif hands_down and leg_dist < 0.22 and stage == "OPEN":
-                        stage = "CLOSE"
-                        record_completed_rep()
-                        weight_factor = user_weight / 70
-                        calories += 0.45 * weight_factor
-
-                # ===== BICEP CURL =====
-                elif exercise == "bicepcurl":
-                    if left_vis >= right_vis:
-                        elbow_angle = smooth_angle(calculate_angle(l_shoulder, l_elbow, l_wrist))
-                    else:
-                        elbow_angle = smooth_angle(calculate_angle(r_shoulder, r_elbow, r_wrist))
-
-                    posture = "GOOD"
-
-                    if elbow_angle > 150:
-                        stage = "DOWN"
-                    elif elbow_angle < 55 and stage == "DOWN":
-                        stage = "UP"
-                        record_completed_rep()
-                        weight_factor = user_weight / 70
-                        calories += 0.25 * weight_factor
-
-                # ===== PLANK =====
-                elif exercise == "plank":
-                    if landmarks[23].visibility >= landmarks[24].visibility:
-                        back_angle = smooth_angle(calculate_angle(l_shoulder, l_hip, l_knee))
-                    else:
-                        back_angle = smooth_angle(calculate_angle(r_shoulder, r_hip, r_knee))
-
-                    if back_angle > 160:
-                        posture = "GOOD"
-                        if plank_start_time is None:
-                            plank_start_time = time.time()
-                        elapsed = time.time() - plank_start_time
-                        counter = int(elapsed)
-                        calories = (elapsed / 3600) * 3.5 * user_weight
-                    else:
-                        posture = "BAD"
-                        plank_start_time = None
-        else:
-            posture = "BAD"
-
-    return {
-        "detected": detected,
-        "reps": int(counter),
-        "target_reps": target_reps,
-        "stage": stage,
-        "posture": posture,
-        "exercise": exercise,
-        "calories": round(calories, 2),
-        "last_rep_duration": round(last_rep_duration, 2) if last_rep_duration else None,
-        "long_pause_count": long_pause_count,
-        "bad_form_count": bad_form_count,
-        "struggle_score": struggle_score
+def format_session_summary(exercise, reps, calories, posture):
+    if exercise == "plank":
+        return f"Plank * {int(reps)} sec | {round(calories, 1)} kcal | {posture}"
+    names = {
+        "squat": "Squats",
+        "pushup": "Push-ups",
+        "jumpingjack": "Jumping Jacks",
+        "bicepcurl": "Bicep Curls"
     }
+    label = names.get(exercise, exercise.capitalize())
+    return f"{label} * {int(reps)} | {round(calories, 1)} kcal | {posture}"
 
 # ================= ROUTES =================
-@app.route("/login")
-def login():
-    redirect_uri = url_for("auth_callback", _external=True)
-    return google.authorize_redirect(redirect_uri)
 
-
-@app.route("/login/callback")
-def auth_callback():
-    token = google.authorize_access_token()
-    user_info = token.get("userinfo")
-
-    session["user"] = {
-        "name": user_info["name"],
-        "email": user_info["email"],
-        "picture": user_info.get("picture", "")
-    }
-
-    return redirect(url_for("index"))
-
-
-@app.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
-@app.route('/')
+@app.route("/")
 def index():
     if "user" not in session:
         return redirect(url_for("login"))
-    return render_template('index.html')
+    user_key = get_current_user_key()
+    user_state = get_user_state(user_key)
+    return render_template(
+        "index.html",
+        user=session.get("user"),
+        exercise=user_state.exercise,
+        user_weight=user_state.user_weight
+    )
+
+@app.route("/login")
+def login():
+    if "user" in session:
+        return redirect(url_for("index"))
+
+    if not google:
+        # Dev / offline mode fallback if OAuth is not configured
+        return render_template(
+            "login_prompt.html" if os.path.exists("templates/login_prompt.html") else "index.html",
+            oauth_configured=False
+        )
+
+    # Note: _external=True generates full url using scheme configured by ProxyFix
+    redirect_uri = url_for("auth_callback", _external=True)
+    return google.authorize_redirect(redirect_uri)
+
+@app.route("/dev_login", methods=["POST", "GET"])
+def dev_login():
+    """Allows testing when running in local development mode without Google credentials."""
+    if os.getenv("FLASK_ENV") != "production" and not os.getenv("RENDER"):
+        email = request.args.get("email", "dev_user@fitcheck.local")
+        session["user"] = {
+            "name": "Dev User",
+            "email": email,
+            "picture": ""
+        }
+        return redirect(url_for("index"))
+    return "Not available in production", 403
+
+@app.route("/login/callback")
+def auth_callback():
+    if not google:
+        return "OAuth not configured", 500
+
+    try:
+        token = google.authorize_access_token()
+        user_info = token.get("userinfo")
+        if not user_info:
+            user_info = google.userinfo()
+
+        email = user_info.get("email")
+        name = user_info.get("name", "User")
+        session["user"] = {
+            "name": name,
+            "email": email,
+            "picture": user_info.get("picture", "")
+        }
+
+        # Check existing profile in database
+        prof = db_manager.get_user_profile(email)
+        weight = float(prof["weight"]) if prof and "weight" in prof else 70.0
+        db_manager.save_user_profile(email, name, weight)
+
+        # Update or create session state with loaded profile weight
+        user_state = get_user_state(email)
+        user_state.user_weight = weight
+
+        return redirect(url_for("index"))
+    except Exception as e:
+        logger.error("OAuth callback error: %s", e)
+        return f"Authentication failed: {str(e)}", 400
+
+@app.route("/logout")
+def logout():
+    user_key = get_current_user_key()
+    with sessions_lock:
+        if user_key in user_sessions:
+            del user_sessions[user_key]
+    session.clear()
+    return redirect(url_for("login"))
 
 @app.route("/process_frame", methods=["POST"])
 def process_frame():
     if "user" not in session:
-        return jsonify({"error": "Not authenticated"}), 401
+        return jsonify({"error": "Unauthorized. Please log in."}), 401
+
+    user_key = get_current_user_key()
+    user_state = get_user_state(user_key)
+
+    frame_bytes = request.get_data()
+    if not frame_bytes:
+        return jsonify({"error": "Empty frame data received"}), 400
 
     try:
-        result = process_frame_bytes(request.get_data())
-        if "error" in result:
-            return jsonify(result), 400
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({"error": f"Frame processing failed: {str(e)}"}), 500
+        np_buffer = np.frombuffer(frame_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(np_buffer, cv2.IMREAD_COLOR)
+        if frame is None:
+            return jsonify({"error": "Invalid image payload"}), 400
 
-@app.route('/set_exercise/<name>')
+        if detector is None:
+            return jsonify({"error": "Pose detector model unavailable on server"}), 503
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+        global last_detection_timestamp
+        with timestamp_lock:
+            timestamp_ms = int(time.time() * 1000)
+            if timestamp_ms <= last_detection_timestamp:
+                timestamp_ms = last_detection_timestamp + 1
+            last_detection_timestamp = timestamp_ms
+
+        with detector_lock:
+            detection_result = detector.detect_for_video(mp_image, timestamp_ms)
+
+        if not detection_result.pose_landmarks:
+            # Body not detected in frame
+            config = EXERCISE_LANDMARKS.get(user_state.exercise, EXERCISE_LANDMARKS["squat"])
+            return jsonify({
+                "detected": False,
+                "reps": int(user_state.counter),
+                "target_reps": user_state.target_reps,
+                "stage": user_state.stage,
+                "posture": "NOT_EVALUATED",
+                "exercise": user_state.exercise,
+                "calories": round(user_state.calories, 2),
+                "guidance": "No person detected in frame. " + config["guidance"],
+                "missing_landmarks": config["required"]
+            }), 200
+
+        # Person detected: run exercise evaluation
+        landmarks = detection_result.pose_landmarks[0]
+        diag = evaluate_frame_pose(user_state, landmarks, now=time.time())
+
+        resp = user_state.to_dict()
+        resp["detected"] = True
+        resp["visibility_ok"] = diag.get("visibility_ok", True)
+        resp["primary_angle"] = diag.get("primary_angle")
+        resp["guidance"] = diag.get("guidance")
+        resp["missing_landmarks"] = diag.get("missing_landmarks", [])
+
+        return jsonify(resp), 200
+
+    except Exception as e:
+        logger.error("Frame processing exception: %s", e)
+        return jsonify({"error": f"Frame tracking error: {str(e)}"}), 500
+
+@app.route("/set_exercise/<name>", methods=["POST", "GET"])
 def set_exercise(name):
-    global exercise, counter, stage, posture, angle_buffer, plank_start_time, session_active, calories
+    if "user" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
 
     allowed = {"squat", "pushup", "jumpingjack", "bicepcurl", "plank"}
     if name not in allowed:
-        return "Invalid", 400
+        return jsonify({"error": f"Invalid exercise. Choose from {list(allowed)}"}), 400
 
-    exercise = name
-    counter = 0
-    stage = "UP"
-    posture = "GOOD"
-    angle_buffer = []
-    plank_start_time = None
-    calories = 0.0
-    session_active = True
-    return "OK"
+    user_key = get_current_user_key()
+    user_state = get_user_state(user_key)
+    user_state.reset_exercise_tracking(exercise=name)
+
+    return jsonify({"ok": True, "exercise": user_state.exercise})
 
 @app.route("/set_weight", methods=["POST"])
 def set_weight():
-    global user_weight
+    if "user" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
     try:
-        data = request.json or {}
-        value = float(data.get("weight", 70))
-        if value < 20 or value > 200:
+        data = request.get_json(silent=True) or {}
+        val = float(data.get("weight", 70))
+        if val < 20 or val > 200:
             return jsonify({"error": "Weight must be between 20 and 200 kg"}), 400
 
-        user_weight = value
+        user_key = get_current_user_key()
+        user_state = get_user_state(user_key)
+        user_state.user_weight = val
 
-        if "user" in session:
-            workouts_collection.update_one(
-                {"type": "profile", "email": session["user"]["email"]},
-                {"$set": {
-                    "type": "profile",
-                    "email": session["user"]["email"],
-                    "name": session["user"]["name"],
-                    "weight": user_weight
-                }},
-                upsert=True
-            )
+        # Save to database profile safely
+        user_email = session["user"].get("email")
+        user_name = session["user"].get("name", "User")
+        db_manager.save_user_profile(user_email, user_name, val)
 
-        return jsonify({"ok": True, "weight": user_weight})
+        return jsonify({"ok": True, "weight": user_state.user_weight})
+    except (ValueError, TypeError):
+        return jsonify({"error": "Please enter a valid numeric weight"}), 400
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error": str(e)}), 500
 
-@app.route('/reset')
+@app.route("/reset", methods=["POST", "GET"])
 def reset():
-    global counter, stage, posture, angle_buffer, calories, history, plank_start_time, session_active
-    global rep_times, last_rep_timestamp, long_pause_count, bad_form_count
-    global struggle_score, last_rep_duration
-    counter = 0
-    stage = "UP"
-    posture = "GOOD"
-    angle_buffer = []
-    calories = 0.0
-    history = []
-    plank_start_time = None
-    session_active = True
-    rep_times = []
-    last_rep_timestamp = None
-    long_pause_count = 0
-    bad_form_count = 0
-    struggle_score = 0
-    last_rep_duration = None
-    save_history()
-    return "OK"
+    if "user" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
 
-@app.route('/end_session')
+    user_key = get_current_user_key()
+    user_state = get_user_state(user_key)
+    user_state.reset_exercise_tracking()
+
+    # Clear user's workouts in MongoDB safely without deleting other users' data
+    user_email = session["user"].get("email")
+    db_manager.clear_user_workouts(user_email)
+
+    return jsonify({"ok": True, "message": "Workout session and history reset"})
+
+@app.route("/end_session", methods=["POST", "GET"])
 def end_session():
-    global counter, stage, posture, angle_buffer, plank_start_time, session_active, calories, history, exercise
+    if "user" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
 
-    session_active = False
+    user_key = get_current_user_key()
+    user_state = get_user_state(user_key)
+    user_state.session_active = False
 
-    if counter > 0:
-        history.append(session_summary(exercise, counter, calories, posture))
-        save_history()
+    saved = False
+    if user_state.counter > 0:
+        summary_text = format_session_summary(
+            user_state.exercise,
+            user_state.counter,
+            user_state.calories,
+            user_state.posture
+        )
+        user_email = session["user"].get("email")
+        session_data = {
+            "exercise": user_state.exercise,
+            "reps": int(user_state.counter),
+            "calories": round(user_state.calories, 2),
+            "posture": user_state.posture,
+            "summary": summary_text,
+            "timestamp": time.time()
+        }
+        saved = db_manager.save_completed_workout(user_email, session_data)
 
-    counter = 0
-    stage = "UP"
-    posture = "GOOD"
-    angle_buffer = []
-    plank_start_time = None
-    calories = 0.0
-    return "OK"
+    user_state.reset_exercise_tracking()
+    return jsonify({"ok": True, "saved": saved})
 
-@app.route('/stats')
+@app.route("/stats")
 def stats():
-    return jsonify({
-        "reps": int(counter),
-        "target_reps": target_reps,
-        "stage": stage,
-        "posture": posture,
-        "exercise": exercise,
-        "calories": round(calories, 2),
-        "last_rep_duration": round(last_rep_duration, 2) if last_rep_duration else None,
-        "long_pause_count": long_pause_count,
-        "bad_form_count": bad_form_count,
-        "struggle_score": struggle_score
-    })
+    if "user" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
 
-@app.route('/history')
+    user_key = get_current_user_key()
+    user_state = get_user_state(user_key)
+    return jsonify(user_state.to_dict())
+
+@app.route("/history")
 def history_data():
-    return jsonify({"history": history[-30:]})
+    if "user" not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    user_email = session["user"].get("email")
+    workouts = db_manager.get_user_workouts(user_email, limit=30)
+    summaries = [w.get("summary") for w in workouts if w.get("summary")]
+
+    return jsonify({"history": summaries})
 
 @app.route("/chat", methods=["POST"])
 def chat():
+    if "user" not in session:
+        return jsonify({"reply": "Please log in to chat with the AI Fitness Coach."}), 401
 
-    data = request.json
+    data = request.get_json(silent=True) or {}
     user_message = data.get("message", "")
 
-    prompt = f"""
-    You are FitCheck AI, a helpful fitness coach.
+    user_key = get_current_user_key()
+    user_state = get_user_state(user_key)
+    workout_ctx = {
+        "exercise": user_state.exercise,
+        "reps": user_state.counter,
+        "posture": user_state.posture,
+        "calories": user_state.calories
+    }
 
-    Current workout:
-    Exercise: {exercise}
-    Reps: {counter}
-    Posture: {posture}
-    Calories: {round(calories, 2)}
+    reply, code = ask_fitness_coach(user_message, workout_ctx)
+    return jsonify({"reply": reply}), code
 
-    User Question:
-    {user_message}
+@app.route("/health")
+def health():
+    return jsonify({
+        "status": "healthy",
+        "database_connected": db_manager.ping(),
+        "pose_model_loaded": detector is not None
+    })
 
-    Give concise and practical fitness advice.
-    """
-
-    try:
-
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.7,
-            max_tokens=500
-        )
-
-        reply = completion.choices[0].message.content
-
-        return jsonify({
-            "reply": reply
-        })
-
-    except Exception as e:
-
-        return jsonify({
-            "reply": f"Error: {str(e)}"
-        })
 if __name__ == "__main__":
-    app.run(debug=False, threaded=True)
+    port = int(os.getenv("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
